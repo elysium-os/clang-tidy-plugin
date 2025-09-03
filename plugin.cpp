@@ -1,19 +1,3 @@
-// AtomicOnlyCheck.cpp
-// Drop-in clang-tidy module that ports your PluginASTAction to a tidy check
-// and reads options from `.clang-tidy`.
-//
-// Check name: elysium-atomic-only
-//
-// .clang-tidy example:
-//   Checks: '-*,elysium-atomic-only'
-//   CheckOptions:
-//     - key: elysium-atomic-only.AllowedFns
-//       value: '^__atomic_.*$|my_atomic_wrap'
-//     - key: elysium-atomic-only.ParamAnnot
-//       value: 'atomic_only_param'
-//     - key: elysium-atomic-only.TypeAnnot
-//       value: 'atomic_only'
-
 #include "clang-tidy/ClangTidy.h"
 #include "clang-tidy/ClangTidyCheck.h"
 #include "clang-tidy/ClangTidyModule.h"
