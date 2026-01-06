@@ -189,10 +189,31 @@ class AtomicOnlyCheck : public ClangTidyCheck {
     std::string Allowed, ParamAnn, TypeAnn;
 };
 
+class GlobalPrefixCheck : public ClangTidyCheck {
+  public:
+    using ClangTidyCheck::ClangTidyCheck;
+
+    void registerMatchers(MatchFinder *Finder) override {
+        Finder->addMatcher(varDecl(isDefinition(), hasGlobalStorage(), unless(anyOf(isImplicit(), hasAncestor(functionDecl()), isExpansionInSystemHeader()))).bind("globalVar"), this);
+    }
+
+    void check(const MatchFinder::MatchResult &Result) override {
+        const auto *VD = Result.Nodes.getNodeAs<VarDecl>("globalVar");
+        if(!VD) return;
+        if(!VD->getIdentifier()) return;
+
+        StringRef Name = VD->getName();
+        if(Name.starts_with("g_")) return;
+
+        diag(VD->getLocation(), "global variable '%0' must be prefixed with g_") << Name;
+    }
+};
+
 class ElysiumModule : public ClangTidyModule {
   public:
     void addCheckFactories(ClangTidyCheckFactories &Factories) override {
         Factories.registerCheck<AtomicOnlyCheck>("elysium-atomic-checks");
+        Factories.registerCheck<GlobalPrefixCheck>("elysium-global-prefix");
     }
 };
 
