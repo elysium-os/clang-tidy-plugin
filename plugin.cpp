@@ -191,22 +191,48 @@ class AtomicOnlyCheck : public ClangTidyCheck {
 
 class GlobalPrefixCheck : public ClangTidyCheck {
   public:
-    using ClangTidyCheck::ClangTidyCheck;
+    GlobalPrefixCheck(StringRef Name, ClangTidyContext *Ctx) : ClangTidyCheck(Name, Ctx) {
+        Prefix = Options.get("Prefix", "g_");
+    }
+
+    void storeOptions(ClangTidyOptions::OptionMap &Opts) override {
+        Options.store(Opts, "Prefix", Prefix);
+    }
 
     void registerMatchers(MatchFinder *Finder) override {
-        Finder->addMatcher(varDecl(isDefinition(), hasGlobalStorage(), unless(anyOf(isImplicit(), hasAncestor(functionDecl()), isExpansionInSystemHeader()))).bind("globalVar"), this);
+        Finder->addMatcher(varDecl(isDefinition(), unless(anyOf(isImplicit(), isExpansionInSystemHeader()))).bind("var"), this);
+        Finder->addMatcher(namedDecl(unless(anyOf(varDecl(), isImplicit(), isExpansionInSystemHeader()))).bind("named"), this);
     }
 
     void check(const MatchFinder::MatchResult &Result) override {
-        const auto *VD = Result.Nodes.getNodeAs<VarDecl>("globalVar");
-        if(!VD) return;
-        if(!VD->getIdentifier()) return;
+        if(Prefix.empty()) return;
 
-        StringRef Name = VD->getName();
-        if(Name.starts_with("g_")) return;
+        if(const auto *VD = Result.Nodes.getNodeAs<VarDecl>("var")) {
+            if(!VD->getIdentifier()) return;
 
-        diag(VD->getLocation(), "global variable '%0' must be prefixed with g_") << Name;
+            StringRef Name = VD->getName();
+            bool HasPrefix = Name.starts_with(Prefix);
+            bool IsGlobal = VD->isFileVarDecl();
+
+            if(IsGlobal) {
+                if(!HasPrefix) diag(VD->getLocation(), "global variable '%0' must be prefixed with %1") << Name << Prefix;
+                return;
+            }
+
+            if(HasPrefix) diag(VD->getLocation(), "only global variables may use the %0 prefix; '%1' is not global") << Prefix << Name;
+            return;
+        }
+
+        const auto *ND = Result.Nodes.getNodeAs<NamedDecl>("named");
+        if(!ND) return;
+        if(!ND->getIdentifier()) return;
+
+        StringRef Name = ND->getName();
+        if(Name.starts_with(Prefix)) diag(ND->getLocation(), "only global variables may use the %0 prefix; '%1' is not a global variable") << Prefix << Name;
     }
+
+  private:
+    std::string Prefix;
 };
 
 class ElysiumModule : public ClangTidyModule {
