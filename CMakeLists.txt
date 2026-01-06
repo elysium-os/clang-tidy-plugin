@@ -10,10 +10,19 @@ set(PLUGIN_INSTALL_DIR
     "${CMAKE_INSTALL_LIBDIR}/clang-tidy-plugins"
     CACHE PATH "Install directory for clang-tidy plugins")
 
-add_library(elysium-tidy MODULE plugin.cpp)
+add_library(elysium-tidy MODULE
+  src/plugin.cpp
+  src/checks/AtomicOnlyCheck.cpp
+  src/checks/GlobalPrefixCheck.cpp
+  src/checks/HeaderNamespaceCheck.cpp
+)
 
 target_include_directories(elysium-tidy PRIVATE
-  ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
+  ${LLVM_INCLUDE_DIRS}
+  ${CLANG_INCLUDE_DIRS}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/checks
+)
 add_definitions(${LLVM_DEFINITIONS})
 
 target_link_libraries(elysium-tidy PRIVATE
