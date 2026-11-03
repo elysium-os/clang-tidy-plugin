@@ -92,18 +92,45 @@ bool addrFlowsToAllowedCall(ASTContext &Ctx, const UnaryOperator *AddrOf, llvm::
     return false;
 }
 
+constexpr llvm::StringLiteral MsgWrite = "storage '%0' is marked atomic; direct write is forbidden (use __atomic_* or a whitelisted wrapper)";
+constexpr llvm::StringLiteral MsgIncDec = "storage '%0' is marked atomic; ++/-- are forbidden (use atomic fetch-add/sub)";
+constexpr llvm::StringLiteral MsgRead = "storage '%0' is marked atomic; raw read is forbidden (use __atomic_load_n or a whitelisted wrapper)";
+constexpr llvm::StringLiteral MsgAddr = "taking address of '%0' is only allowed for atomic builtins or whitelisted wrappers";
+
+bool isUnevaluatedOperand(ASTContext &Ctx, const Expr *E) {
+    const Stmt *Cur = E;
+    for(unsigned hops = 0; hops < 64 && Cur; ++hops) {
+        auto Parents = Ctx.getParentMapContext().getParents(*Cur);
+        if(Parents.empty()) break;
+
+        const Stmt *Next = nullptr;
+        for(const auto &Pn : Parents)
+            if(const auto *S = Pn.get<Stmt>()) { Next = S; break; }
+        if(!Next) break;
+
+        if(const auto *GSE = dyn_cast<GenericSelectionExpr>(Next)) {
+            const Expr *Ctrl = GSE->getControllingExpr();
+            const auto *CurE = dyn_cast<Expr>(Cur);
+            return Ctrl != nullptr && CurE != nullptr && Ctrl->IgnoreParenImpCasts() == CurE->IgnoreParenImpCasts();
+        }
+
+        if(isa<UnaryExprOrTypeTraitExpr>(Next)) return true;
+
+        if(isa<CallExpr>(Next) || isa<BinaryOperator>(Next) || isa<CompoundStmt>(Next) || isa<ReturnStmt>(Next))
+            break;
+
+        Cur = Next;
+    }
+    return false;
+}
+
 class AtomicOnlyVisitor : public RecursiveASTVisitor<AtomicOnlyVisitor> {
   public:
-    AtomicOnlyVisitor(ASTContext &C, DiagnosticsEngine &DE, llvm::StringRef Allowed, llvm::StringRef ParamAnn, llvm::StringRef TypeAnn) : Ctx(C), Diags(DE), AllowedFns(Allowed), ParamAnnot(ParamAnn), TypeAnnot(TypeAnn) {
-        DWrite = Diags.getCustomDiagID(DiagnosticsEngine::Error, "storage '%0' is marked atomic; direct write is forbidden (use __atomic_* or a whitelisted wrapper)");
-        DIncDec = Diags.getCustomDiagID(DiagnosticsEngine::Error, "storage '%0' is marked atomic; ++/-- are forbidden (use atomic fetch-add/sub)");
-        DRead = Diags.getCustomDiagID(DiagnosticsEngine::Error, "storage '%0' is marked atomic; raw read is forbidden (use __atomic_load_n or a whitelisted wrapper)");
-        DAddr = Diags.getCustomDiagID(DiagnosticsEngine::Error, "taking address of '%0' is only allowed for atomic builtins or whitelisted wrappers");
-    }
+    AtomicOnlyVisitor(ASTContext &C, ClangTidyCheck &Chk, llvm::StringRef Allowed, llvm::StringRef ParamAnn, llvm::StringRef TypeAnn) : Ctx(C), Check(Chk), AllowedFns(Allowed), ParamAnnot(ParamAnn), TypeAnnot(TypeAnn) {}
 
     bool VisitBinaryOperator(BinaryOperator *BO) {
         if(!BO->isAssignmentOp()) return true;
-        if(const Decl *D = designatedAtomicStorage(BO->getLHS(), TypeAnnot)) { report(BO->getOperatorLoc(), DWrite, D); }
+        if(const Decl *D = designatedAtomicStorage(BO->getLHS(), TypeAnnot)) { report(BO->getOperatorLoc(), MsgWrite, D); }
         return true;
     }
 
@@ -113,11 +140,11 @@ class AtomicOnlyVisitor : public RecursiveASTVisitor<AtomicOnlyVisitor> {
             case UO_PostInc:
             case UO_PreDec:
             case UO_PostDec:
-                if(const Decl *D = designatedAtomicStorage(UO->getSubExpr(), TypeAnnot)) report(UO->getOperatorLoc(), DIncDec, D);
+                if(const Decl *D = designatedAtomicStorage(UO->getSubExpr(), TypeAnnot)) report(UO->getOperatorLoc(), MsgIncDec, D);
                 break;
             case UO_AddrOf:
                 if(const Decl *D = designatedAtomicStorage(UO->getSubExpr(), TypeAnnot)) {
-                    if(!addrFlowsToAllowedCall(Ctx, UO, AllowedFns, ParamAnnot)) report(UO->getOperatorLoc(), DAddr, D);
+                    if(!addrFlowsToAllowedCall(Ctx, UO, AllowedFns, ParamAnnot)) report(UO->getOperatorLoc(), MsgAddr, D);
                 }
                 break;
             default: break;
@@ -127,26 +154,27 @@ class AtomicOnlyVisitor : public RecursiveASTVisitor<AtomicOnlyVisitor> {
 
     bool VisitImplicitCastExpr(ImplicitCastExpr *ICE) {
         if(ICE->getCastKind() != CK_LValueToRValue) return true;
-        if(const Decl *D = designatedAtomicStorage(ICE->getSubExpr(), TypeAnnot)) report(ICE->getExprLoc(), DRead, D);
+        if(isUnevaluatedOperand(Ctx, ICE)) return true;
+        if(const Decl *D = designatedAtomicStorage(ICE->getSubExpr(), TypeAnnot)) report(ICE->getExprLoc(), MsgRead, D);
         return true;
     }
 
   private:
     ASTContext &Ctx;
-    DiagnosticsEngine &Diags;
+    ClangTidyCheck &Check;
     llvm::Regex AllowedFns;
     std::string ParamAnnot;
     std::string TypeAnnot;
 
-    unsigned DWrite{}, DIncDec{}, DRead{}, DAddr{};
+    void report(SourceLocation Loc, llvm::StringRef Msg, const Decl *D) {
+        if(Loc.isInvalid()) return;
 
-    void report(SourceLocation Loc, unsigned ID, const Decl *D) {
         if(const auto *FD = dyn_cast<FieldDecl>(D))
-            Diags.Report(Loc, ID) << FD->getName();
+            Check.diag(Loc, Msg, DiagnosticIDs::Error) << FD->getName();
         else if(const auto *VD = dyn_cast<VarDecl>(D))
-            Diags.Report(Loc, ID) << VD->getName();
+            Check.diag(Loc, Msg, DiagnosticIDs::Error) << VD->getName();
         else
-            Diags.Report(Loc, ID) << "<atomic>";
+            Check.diag(Loc, Msg, DiagnosticIDs::Error) << "<atomic>";
     }
 };
 
@@ -174,7 +202,7 @@ void AtomicOnlyCheck::check(const MatchFinder::MatchResult &Result) {
     const auto *TU = Result.Nodes.getNodeAs<TranslationUnitDecl>("tu");
     if(!TU) return;
 
-    AtomicOnlyVisitor V(*Result.Context, Result.Context->getDiagnostics(), Allowed, ParamAnn, TypeAnn);
+    AtomicOnlyVisitor V(*Result.Context, *this, Allowed, ParamAnn, TypeAnn);
     V.TraverseDecl(const_cast<TranslationUnitDecl *>(TU));
 }
 
